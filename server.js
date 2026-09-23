@@ -162,43 +162,127 @@ function extractListingLinks(html, pageUrl) {
   return Array.from(candidates.values());
 }
 
-const LOGO_BANNER_PATTERN = /(logo|sprite|icon|banner|placeholder|avatar|badge|payment|social|footer|header-bg|watermark|spinner|loading|blank\.gif)/i;
+const LOGO_BANNER_PATTERN =
+  /(logo|sprite|icon[-_.]|\/icons?\/|favicon|banner|placeholder|avatar|badge|payment|social|footer|header[-_]?bg|watermark|spinner|loading|blank\.gif|whatsapp|instagram|facebook|twitter|youtube|flag[-_])/i;
 
-function extractCarImages(html, pageUrl) {
-  const $ = cheerio.load(html);
-  const images = new Set();
+// Chrome/nav regions repeat on every page of a theme and are the usual
+// source of stray "logo PNGs in the background" ending up in the gallery —
+// strip them from the DOM before any image scan even runs, rather than
+// relying on filename pattern-matching alone to catch every case.
+const STRUCTURAL_EXCLUDE_SELECTOR = [
+  'header', 'nav', 'footer',
+  '.site-header', '.site-footer', '.navbar', '.nav', '.menu', '.main-menu',
+  '#masthead', '#colophon',
+  '.logo', '.site-logo', '.brand',
+  '.widget', 'aside', '.sidebar',
+  '.breadcrumb', '.breadcrumbs',
+  '.related', '.related-products', '.upsells', '.cross-sells',
+  'script', 'style', 'noscript'
+].join(', ');
 
-  $('img, source').each((_, el) => {
+// Dealer/WooCommerce-style product pages almost always wrap the actual car
+// photos in one of these gallery widgets, distinct from decorative images
+// used elsewhere on the page (theme chrome, category thumbnails, ads).
+const GALLERY_CONTAINER_SELECTORS = [
+  '.woocommerce-product-gallery',
+  '.product-gallery',
+  '.product-images',
+  '.single-product-images',
+  '.images',
+  '.car-gallery',
+  '.vehicle-gallery',
+  '.vehicle-images',
+  '.listing-gallery',
+  '.listing-images',
+  '[class*="product-gallery" i]',
+  '[class*="car-gallery" i]',
+  '[class*="vehicle-gallery" i]',
+  '.swiper-wrapper',
+  '.slick-slider',
+  '.owl-carousel',
+  '[data-lightbox]',
+  '[data-fancybox]'
+];
+
+function bestImageUrlFromElement($el, pageUrl) {
+  const anchorHref = $el.closest('a').attr('href');
+  const srcsetLargest = $el
+    .attr('srcset')
+    ?.split(',')
+    .map((s) => s.trim().split(/\s+/)[0])
+    .filter(Boolean)
+    .pop();
+
+  const candidates = [
+    $el.attr('data-large_image'),
+    $el.attr('data-large_image_src'),
+    $el.attr('data-full'),
+    $el.attr('data-zoom-image'),
+    anchorHref && /\.(jpe?g|png|webp)(\?|$)/i.test(anchorHref) ? anchorHref : null,
+    $el.attr('data-src'),
+    $el.attr('data-lazy-src'),
+    $el.attr('data-original'),
+    srcsetLargest,
+    $el.attr('src')
+  ].filter(Boolean);
+
+  for (const raw of candidates) {
+    const absolute = resolveUrl(pageUrl, raw);
+    if (absolute) return absolute;
+  }
+  return null;
+}
+
+function isLikelyPhoto(absoluteUrl, $el) {
+  let u;
+  try {
+    u = new URL(absoluteUrl);
+  } catch {
+    return false;
+  }
+
+  if (/\.svg(\?|$)/i.test(u.pathname)) return false;
+  if (LOGO_BANNER_PATTERN.test(u.pathname)) return false;
+
+  const widthAttr = parseInt($el.attr('width') || '0', 10);
+  const heightAttr = parseInt($el.attr('height') || '0', 10);
+  if ((widthAttr && widthAttr < 150) || (heightAttr && heightAttr < 150)) return false;
+
+  return true;
+}
+
+function collectImagesFromScope($, $scope, pageUrl, images) {
+  $scope.find('img, source').each((_, el) => {
     const $el = $(el);
-    const candidates = [
-      $el.attr('src'),
-      $el.attr('data-src'),
-      $el.attr('data-lazy-src'),
-      $el.attr('data-original'),
-      $el.attr('srcset')?.split(',').pop()?.trim().split(' ')[0]
-    ].filter(Boolean);
-
-    for (const raw of candidates) {
-      const absolute = resolveUrl(pageUrl, raw);
-      if (!absolute) continue;
-
-      let u;
-      try {
-        u = new URL(absolute);
-      } catch {
-        continue;
-      }
-
-      if (/\.svg(\?|$)/i.test(u.pathname)) continue;
-      if (LOGO_BANNER_PATTERN.test(u.pathname)) continue;
-
-      const widthAttr = parseInt($el.attr('width') || '0', 10);
-      const heightAttr = parseInt($el.attr('height') || '0', 10);
-      if ((widthAttr && widthAttr < 120) || (heightAttr && heightAttr < 120)) continue;
-
+    const absolute = bestImageUrlFromElement($el, pageUrl);
+    if (absolute && isLikelyPhoto(absolute, $el)) {
       images.add(absolute);
     }
   });
+}
+
+function extractCarImages(html, pageUrl) {
+  const $ = cheerio.load(html);
+  $(STRUCTURAL_EXCLUDE_SELECTOR).remove();
+
+  const images = new Set();
+
+  // Prefer an actual gallery widget over the whole page — this is what
+  // keeps unrelated decorative/background images out of the results.
+  for (const selector of GALLERY_CONTAINER_SELECTORS) {
+    const $container = $(selector);
+    if (!$container.length) continue;
+
+    collectImagesFromScope($, $container, pageUrl, images);
+    if (images.size) break;
+  }
+
+  // No recognizable gallery widget: fall back to the main content area only
+  // (never the raw <body>, which is what let theme-wide chrome leak in).
+  if (!images.size) {
+    const $main = $('main, article, #content, .content, .entry-content, #primary').first();
+    collectImagesFromScope($, $main.length ? $main : $('body'), pageUrl, images);
+  }
 
   return Array.from(images).slice(0, MAX_IMAGES_PER_CAR);
 }
@@ -223,6 +307,117 @@ const GENERIC_HEADING_PATTERN = /^(cars?|vehicles?|shop|products?|inventory|list
 function cleanTitleTag(title) {
   // Strip a trailing " | Site Name" / " - Site Name" suffix some themes add.
   return title.replace(/\s*[|–—-]\s*[^|–—-]{1,40}$/, '').trim() || title.trim();
+}
+
+const SPEC_TABLE_SELECTOR = [
+  'table.woocommerce-product-attributes tr',
+  'table.shop_attributes tr',
+  '.product-attributes table tr',
+  '#tab-additional_information table tr',
+  '.woocommerce-Tabs-panel table tr',
+  '.car-specs table tr',
+  '.vehicle-specs table tr'
+].join(', ');
+
+const SPEC_ITEM_SELECTOR = '.spec-item, .vehicle-spec, .car-detail-item, [class*="spec-row" i], [class*="detail-item" i]';
+
+const MAX_SPEC_ENTRIES = 60;
+
+// Pulls every label/value pair the page exposes (WooCommerce "Additional
+// Information" tables, <dl> definition lists, generic 2-column tables, and
+// label/value widget pairs) into one ordered map, instead of regexing a
+// handful of fields out of the flattened body text.
+function extractSpecsMap($) {
+  const specs = new Map();
+
+  const addEntry = (rawLabel, rawValue) => {
+    if (specs.size >= MAX_SPEC_ENTRIES) return;
+    const label = (rawLabel || '').replace(/\s+/g, ' ').replace(/:\s*$/, '').trim();
+    const value = (rawValue || '').replace(/\s+/g, ' ').trim();
+    if (!label || !value || label.length > 60 || value.length > 300) return;
+    const key = label.toLowerCase();
+    if (!specs.has(key)) specs.set(key, { label, value });
+  };
+
+  $(SPEC_TABLE_SELECTOR).each((_, row) => {
+    const cells = $(row).find('th, td');
+    if (cells.length < 2) return;
+    const label = $(cells[0]).text();
+    const value = cells
+      .slice(1)
+      .map((_, c) => $(c).text())
+      .get()
+      .join(' ');
+    addEntry(label, value);
+  });
+
+  $('table').each((_, table) => {
+    const $table = $(table);
+    if ($table.closest(SPEC_TABLE_SELECTOR).length) return; // already handled above
+    $table.find('tr').each((_, row) => {
+      const cells = $(row).find('th, td');
+      if (cells.length !== 2) return; // avoid layout tables with irregular structure
+      addEntry($(cells[0]).text(), $(cells[1]).text());
+    });
+  });
+
+  $('dl').each((_, dl) => {
+    const dts = $(dl).find('dt');
+    dts.each((_, dt) => {
+      const value = $(dt).next('dd').text();
+      addEntry($(dt).text(), value);
+    });
+  });
+
+  $(SPEC_ITEM_SELECTOR).each((_, el) => {
+    const $el = $(el);
+    const label = $el.find('[class*="label" i]').first().text() || $el.find('span, strong, b').first().text();
+    const value = $el.find('[class*="value" i]').first().text();
+    if (label && value) addEntry(label, value);
+  });
+
+  // Fallback: plain "Label: Value" or "Label - Value" text lines, for themes
+  // that don't use a table/dl/label-value widget at all.
+  $('li, .spec, .specs, .specification').each((_, el) => {
+    if (specs.size >= MAX_SPEC_ENTRIES) return;
+    const t = $(el).text().replace(/\s+/g, ' ').trim();
+    if (!t || t.length > 150) return;
+    const m = t.match(/^([A-Za-z][A-Za-z\s./]{1,40}?)\s*[:\-]\s*(.+)$/);
+    if (m) addEntry(m[1], m[2]);
+  });
+
+  return specs;
+}
+
+function getSpec(specsMap, aliases, avoid = []) {
+  for (const alias of aliases) {
+    const hit = specsMap.get(alias);
+    if (hit) return hit.value;
+  }
+  // Loose fallback: match a map key that contains the alias as a substring.
+  // `avoid` keeps a generic alias (e.g. "color") from grabbing a more
+  // specific sibling field's key (e.g. "interior color") when the exact
+  // label this field wants isn't present.
+  for (const [key, entry] of specsMap) {
+    if (avoid.some((a) => key.includes(a))) continue;
+    if (aliases.some((alias) => key.includes(alias))) return entry.value;
+  }
+  return '';
+}
+
+function extractDescription($) {
+  const selectors = [
+    '.woocommerce-product-details__short-description',
+    '.product-short-description',
+    '#tab-description',
+    '.entry-content',
+    '.description'
+  ];
+  for (const sel of selectors) {
+    const text = $(sel).first().text().replace(/\s+/g, ' ').trim();
+    if (text.length > 20) return text.slice(0, 2000);
+  }
+  return '';
 }
 
 function extractCarDetails(html, url) {
@@ -254,27 +449,80 @@ function extractCarDetails(html, url) {
     /[\d,]{4,}\s*(AED|USD|EUR|GBP)/i
   ]) || '';
 
-  const year = firstMatch(bodyText, [/\b(19[5-9]\d|20[0-4]\d)\b/]) || '';
+  const specsMap = extractSpecsMap($);
 
-  const mileage = firstMatch(bodyText, [
-    /[\d,]{2,}\s*(km|kms|miles|mi)\b/i,
-    /mileage\s*[:\-]?\s*[\d,]{2,}\s*(km|miles)?/i
-  ]) || '';
+  const year =
+    getSpec(specsMap, ['year', 'model year']) ||
+    firstMatch(bodyText, [/\b(19[5-9]\d|20[0-4]\d)\b/]) ||
+    '';
 
-  const transmission = firstMatch(bodyText, [/\b(automatic|manual|cvt|tiptronic)\b/i]) || '';
+  const mileage =
+    getSpec(specsMap, ['mileage', 'kilometers', 'kilometres', 'km']) ||
+    firstMatch(bodyText, [
+      /[\d,]{2,}\s*(km|kms|miles|mi)\b/i,
+      /mileage\s*[:\-]?\s*[\d,]{2,}\s*(km|miles)?/i
+    ]) ||
+    '';
 
-  const fuelType = firstMatch(bodyText, [/\b(petrol|diesel|electric|hybrid|gasoline)\b/i]) || '';
+  const transmission =
+    getSpec(specsMap, ['transmission', 'gearbox']) ||
+    firstMatch(bodyText, [/\b(automatic|manual|cvt|tiptronic)\b/i]) ||
+    '';
 
-  const specParts = [];
-  $('li, table tr, .spec, .specs, .specification').each((_, el) => {
-    const t = $(el).text().replace(/\s+/g, ' ').trim();
-    if (t && t.length < 120 && /[:\-]/.test(t)) specParts.push(t);
-  });
-  const specs = Array.from(new Set(specParts)).slice(0, 15).join(' | ');
+  const fuelType =
+    getSpec(specsMap, ['fuel type', 'fuel']) ||
+    firstMatch(bodyText, [/\b(petrol|diesel|electric|hybrid|gasoline)\b/i]) ||
+    '';
+
+  const bodyType = getSpec(specsMap, ['body type', 'body']);
+  const exteriorColor = getSpec(specsMap, ['exterior color', 'exterior colour', 'color', 'colour'], ['interior']);
+  const interiorColor = getSpec(specsMap, ['interior color', 'interior colour']);
+  const engine = getSpec(specsMap, ['engine capacity', 'engine size', 'engine']);
+  const cylinders = getSpec(specsMap, ['cylinders', 'no. of cylinders']);
+  const doors = getSpec(specsMap, ['doors', 'no. of doors']);
+  const seats = getSpec(specsMap, ['seats', 'seating capacity']);
+  const horsepower = getSpec(specsMap, ['horsepower', 'horse power', 'hp']);
+  const driveType = getSpec(specsMap, ['drive type', 'drivetrain']);
+  const steeringSide = getSpec(specsMap, ['steering side', 'steering']);
+  const regionalSpecs = getSpec(specsMap, ['regional specs', 'regional specification', 'specs']);
+  const warranty = getSpec(specsMap, ['warranty']);
+  const condition = getSpec(specsMap, ['condition']);
+  const vin = getSpec(specsMap, ['vin', 'chassis no', 'chassis number']);
+
+  const description = extractDescription($);
+
+  const fullSpecs = Array.from(specsMap.values())
+    .map(({ label, value }) => `${label}: ${value}`)
+    .join(' | ');
 
   const images = extractCarImages(html, url);
 
-  return { name, price, year, mileage, transmission, fuelType, specs, url, images };
+  return {
+    name,
+    price,
+    year,
+    mileage,
+    transmission,
+    fuelType,
+    bodyType,
+    exteriorColor,
+    interiorColor,
+    engine,
+    cylinders,
+    doors,
+    seats,
+    horsepower,
+    driveType,
+    steeringSide,
+    regionalSpecs,
+    warranty,
+    condition,
+    vin,
+    description,
+    fullSpecs,
+    url,
+    images
+  };
 }
 
 async function downloadImage(imageUrl, destPath) {
@@ -306,7 +554,22 @@ async function buildExcelWorkbook(cars, outputPath) {
     { header: 'Mileage', key: 'mileage', width: 16 },
     { header: 'Transmission', key: 'transmission', width: 16 },
     { header: 'Fuel Type', key: 'fuelType', width: 14 },
-    { header: 'Specs', key: 'specs', width: 60 },
+    { header: 'Body Type', key: 'bodyType', width: 16 },
+    { header: 'Exterior Color', key: 'exteriorColor', width: 16 },
+    { header: 'Interior Color', key: 'interiorColor', width: 16 },
+    { header: 'Engine', key: 'engine', width: 16 },
+    { header: 'Cylinders', key: 'cylinders', width: 12 },
+    { header: 'Doors', key: 'doors', width: 10 },
+    { header: 'Seats', key: 'seats', width: 10 },
+    { header: 'Horsepower', key: 'horsepower', width: 14 },
+    { header: 'Drive Type', key: 'driveType', width: 14 },
+    { header: 'Steering Side', key: 'steeringSide', width: 14 },
+    { header: 'Regional Specs', key: 'regionalSpecs', width: 18 },
+    { header: 'Warranty', key: 'warranty', width: 18 },
+    { header: 'Condition', key: 'condition', width: 14 },
+    { header: 'VIN / Chassis No.', key: 'vin', width: 22 },
+    { header: 'Description', key: 'description', width: 50 },
+    { header: 'Full Specs', key: 'fullSpecs', width: 70 },
     { header: 'Image Count', key: 'imageCount', width: 14 },
     { header: 'Listing URL', key: 'url', width: 50 }
   ];
@@ -332,7 +595,22 @@ async function buildExcelWorkbook(cars, outputPath) {
       mileage: car.mileage,
       transmission: car.transmission,
       fuelType: car.fuelType,
-      specs: car.specs,
+      bodyType: car.bodyType,
+      exteriorColor: car.exteriorColor,
+      interiorColor: car.interiorColor,
+      engine: car.engine,
+      cylinders: car.cylinders,
+      doors: car.doors,
+      seats: car.seats,
+      horsepower: car.horsepower,
+      driveType: car.driveType,
+      steeringSide: car.steeringSide,
+      regionalSpecs: car.regionalSpecs,
+      warranty: car.warranty,
+      condition: car.condition,
+      vin: car.vin,
+      description: car.description,
+      fullSpecs: car.fullSpecs,
       imageCount: car.imageCount,
       url: car.url
     });
@@ -347,7 +625,7 @@ async function buildExcelWorkbook(cars, outputPath) {
     });
   });
 
-  sheet.autoFilter = { from: 'A1', to: 'I1' };
+  sheet.autoFilter = { from: 'A1', to: 'X1' };
   sheet.views = [{ state: 'frozen', ySplit: 1 }];
 
   await workbook.xlsx.writeFile(outputPath);
@@ -487,7 +765,22 @@ async function scrapeInventory({ targetUrl, maxPages }, logger) {
       mileage: details.mileage,
       transmission: details.transmission,
       fuelType: details.fuelType,
-      specs: details.specs,
+      bodyType: details.bodyType,
+      exteriorColor: details.exteriorColor,
+      interiorColor: details.interiorColor,
+      engine: details.engine,
+      cylinders: details.cylinders,
+      doors: details.doors,
+      seats: details.seats,
+      horsepower: details.horsepower,
+      driveType: details.driveType,
+      steeringSide: details.steeringSide,
+      regionalSpecs: details.regionalSpecs,
+      warranty: details.warranty,
+      condition: details.condition,
+      vin: details.vin,
+      description: details.description,
+      fullSpecs: details.fullSpecs,
       url: details.url,
       imageCount: downloadedCount
     });
