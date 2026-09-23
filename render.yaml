@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: universal-car-inventory-scraper
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.1
