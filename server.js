@@ -62,14 +62,46 @@ function resolveUrl(base, href) {
   }
 }
 
-async function fetchHtml(url) {
-  const res = await axios.get(url, {
-    headers: HTTP_HEADERS,
-    timeout: REQUEST_TIMEOUT_MS,
-    responseType: 'text',
-    validateStatus: (s) => s >= 200 && s < 400
-  });
-  return res.data;
+async function fetchHtml(url, attempts = 3) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await axios.get(url, {
+        headers: HTTP_HEADERS,
+        timeout: REQUEST_TIMEOUT_MS,
+        responseType: 'text',
+        validateStatus: (s) => s >= 200 && s < 400
+      });
+      return res.data;
+    } catch (err) {
+      lastErr = err;
+      // Only worth retrying on transient network/timeout errors, not on a
+      // real 4xx/5xx response (validateStatus already filters those into
+      // axios's own error, but we still don't want to hammer a hard failure).
+      const transient = !err.response || err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET';
+      if (i < attempts && transient) {
+        await new Promise((r) => setTimeout(r, 750 * i));
+        continue;
+      }
+      break;
+    }
+  }
+  throw lastErr;
+}
+
+// Runs async tasks with a concurrency cap instead of one-at-a-time or all-at-once.
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function runNext() {
+    const i = nextIndex++;
+    if (i >= items.length) return;
+    results[i] = await worker(items[i], i);
+    await runNext();
+  }
+  const runners = Array.from({ length: Math.min(limit, items.length) }, runNext);
+  await Promise.all(runners);
+  return results;
 }
 
 function buildPaginationUrl(baseUrl, pageNum) {
@@ -174,21 +206,50 @@ function extractCarImages(html, pageUrl) {
 function firstMatch(text, patterns) {
   for (const p of patterns) {
     const m = text.match(p);
-    if (m) return (m[1] || m[0]).trim();
+    // Always take the full match, not a capture group: several of the
+    // patterns below use a group only to anchor on a currency/unit token,
+    // and the group alone (e.g. just "AED") throws away the actual value.
+    if (m) return m[0].trim();
   }
   return '';
+}
+
+// Many dealer-site themes reuse a generic archive/shop heading ("Cars",
+// "Shop", "Inventory", "All Vehicles"...) as the <h1> on every listing page,
+// including individual car pages, instead of the car's own title. Detect
+// that so we can fall back to a per-page title source instead.
+const GENERIC_HEADING_PATTERN = /^(cars?|vehicles?|shop|products?|inventory|listings?|home|catalog|our\s+(cars?|vehicles?|inventory))$/i;
+
+function cleanTitleTag(title) {
+  // Strip a trailing " | Site Name" / " - Site Name" suffix some themes add.
+  return title.replace(/\s*[|–—-]\s*[^|–—-]{1,40}$/, '').trim() || title.trim();
 }
 
 function extractCarDetails(html, url) {
   const $ = cheerio.load(html);
   const bodyText = $('body').text().replace(/\s+/g, ' ');
 
+  const ogTitle = $('meta[property="og:title"]').attr('content')?.trim();
+  const h1Text = $('h1').first().text().trim();
+  const titleTag = $('title').text().trim();
+
   const name =
-    $('h1').first().text().trim() ||
-    $('title').text().trim() ||
+    (ogTitle && !GENERIC_HEADING_PATTERN.test(ogTitle) && ogTitle) ||
+    (h1Text && !GENERIC_HEADING_PATTERN.test(h1Text) && h1Text) ||
+    (titleTag && cleanTitleTag(titleTag)) ||
+    h1Text ||
     'Unknown Car';
 
-  const price = firstMatch(bodyText, [
+  // Prefer a real price widget when the theme exposes one (WooCommerce and
+  // most storefront themes do) — far more reliable than scanning body text.
+  const priceSelectorText = $('.price, .woocommerce-Price-amount, [class*="price" i]')
+    .first()
+    .text()
+    .replace(/\s+/g, ' ')
+    .trim();
+  const priceLooksValid = /\d/.test(priceSelectorText) && priceSelectorText.length < 40;
+
+  const price = (priceLooksValid && priceSelectorText) || firstMatch(bodyText, [
     /(AED|USD|EUR|GBP|\$|price)\s*[:\-]?\s*[\d,]{3,}/i,
     /[\d,]{4,}\s*(AED|USD|EUR|GBP)/i
   ]) || '';
@@ -371,19 +432,26 @@ async function scrapeInventory({ targetUrl, maxPages }, logger) {
   let totalImages = 0;
   const usedFolderNames = new Set();
 
-  for (let i = 0; i < listingUrls.length; i++) {
-    const url = listingUrls[i];
-    logger.push(`[${i + 1}/${listingUrls.length}] Extracting: ${url}`, 'info');
+  const LISTING_CONCURRENCY = 4;
+  const IMAGE_CONCURRENCY = 5;
 
-    let html;
+  // Fetch + parse every listing page concurrently (bounded) instead of one
+  // at a time — for a real inventory (dozens to hundreds of cars) a fully
+  // sequential loop can take long enough to run past a hosting platform's
+  // own request timeout even though every individual fetch succeeds.
+  const detailResults = await runWithConcurrency(listingUrls, LISTING_CONCURRENCY, async (url, i) => {
+    logger.push(`[${i + 1}/${listingUrls.length}] Extracting: ${url}`, 'info');
     try {
-      html = await fetchHtml(url);
+      const html = await fetchHtml(url);
+      return { url, details: extractCarDetails(html, url) };
     } catch (err) {
       logger.push(`Failed to fetch listing: ${err.message}`, 'warn');
-      continue;
+      return { url, details: null };
     }
+  });
 
-    const details = extractCarDetails(html, url);
+  for (const { details } of detailResults) {
+    if (!details) continue;
 
     let folderName = sanitizeFolderName(details.name);
     let uniqueFolder = folderName;
@@ -397,18 +465,17 @@ async function scrapeInventory({ targetUrl, maxPages }, logger) {
     const carImagesDir = path.join(imagesDir, uniqueFolder);
     await fsp.mkdir(carImagesDir, { recursive: true });
 
-    let downloadedCount = 0;
-    for (let imgIdx = 0; imgIdx < details.images.length; imgIdx++) {
-      const imgUrl = details.images[imgIdx];
+    const downloadFlags = await runWithConcurrency(details.images, IMAGE_CONCURRENCY, async (imgUrl, imgIdx) => {
       const ext = imageExtensionFromUrl(imgUrl);
       const destPath = path.join(carImagesDir, `image_${imgIdx + 1}.${ext}`);
       try {
         await downloadImage(imgUrl, destPath);
-        downloadedCount++;
+        return true;
       } catch {
-        // skip broken image
+        return false; // skip broken image
       }
-    }
+    });
+    const downloadedCount = downloadFlags.filter(Boolean).length;
 
     totalImages += downloadedCount;
     logger.push(`  -> ${details.name} | ${downloadedCount} image(s) saved`, downloadedCount ? 'ok' : 'warn');
