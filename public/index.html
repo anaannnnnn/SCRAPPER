@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Universal Car Inventory Scraper</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          bg: '#0b0f14',
+          panel: '#111826',
+          panel2: '#161f2e',
+          border: '#243043',
+          accent: '#22d3ee',
+          accent2: '#818cf8',
+          good: '#34d399',
+          bad: '#f87171',
+          warn: '#fbbf24'
+        },
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif']
+        }
+      }
+    }
+  }
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Inter', sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: #0b0f14; }
+  ::-webkit-scrollbar-thumb { background: #243043; border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: #2f3f58; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    border: 3px solid rgba(255,255,255,0.15);
+    border-top-color: #22d3ee;
+    border-radius: 50%;
+    width: 18px; height: 18px;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .log-line { animation: fadeIn 0.25s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
+
+  .glow { box-shadow: 0 0 0 1px rgba(34,211,238,0.15), 0 8px 30px -8px rgba(34,211,238,0.15); }
+
+  @keyframes pulseDot {
+    0%, 100% { opacity: 1; } 50% { opacity: 0.3; }
+  }
+  .pulse-dot { animation: pulseDot 1.4s ease-in-out infinite; }
+</style>
+</head>
+<body class="bg-bg text-slate-200 min-h-screen antialiased">
+
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between mb-8">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent to-accent2 flex items-center justify-center shadow-lg shadow-accent/20">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 text-bg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 17h14M5 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm14 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM5 17l1.5-6.5A2 2 0 0 1 8.42 9h7.16a2 2 0 0 1 1.92 1.5L19 17M5 17H3m16 0h2M6.5 10.5h11" />
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold text-white tracking-tight">Universal Car Inventory Scraper</h1>
+        <p class="text-xs text-slate-500">Crawl · Extract · Download images · Export to Excel</p>
+      </div>
+    </div>
+    <div class="hidden sm:flex items-center gap-2 text-xs text-slate-500 mono">
+      <span class="w-2 h-2 rounded-full bg-good pulse-dot"></span>
+      <span id="server-status">engine ready</span>
+    </div>
+  </header>
+
+  <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+
+    <!-- Left: Controls -->
+    <div class="lg:col-span-2 space-y-6">
+      <div class="bg-panel border border-border rounded-2xl p-6 glow">
+        <h2 class="text-sm font-semibold text-white mb-4 flex items-center gap-2">
+          <svg class="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6V4m0 2a2 2 0 100 4 2 2 0 000-4zm0 10v-2m0 2a2 2 0 100 4 2 2 0 000-4zM6 12H4m2 0a2 2 0 10-4 0 2 2 0 004 0zm12 0h2m-2 0a2 2 0 104 0 2 2 0 00-4 0z"/></svg>
+          Extraction Settings
+        </h2>
+
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Target Inventory URL</label>
+            <input id="target-url" type="text" value="https://autodealsuae.com/cars/"
+              class="w-full bg-panel2 border border-border rounded-lg px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent/50 mono" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Max Pages to Scan</label>
+            <input id="max-pages" type="number" min="1" max="200" value="5"
+              class="w-full bg-panel2 border border-border rounded-lg px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent/50 mono" />
+          </div>
+
+          <button id="start-btn" onclick="startExtraction()"
+            class="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-accent to-accent2 hover:opacity-90 transition text-bg font-semibold text-sm rounded-lg px-4 py-3 disabled:opacity-50 disabled:cursor-not-allowed">
+            <span id="start-btn-spinner" class="spinner hidden"></span>
+            <svg id="start-btn-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 3l14 9-14 9V3z"/></svg>
+            <span id="start-btn-text">Start Extraction</span>
+          </button>
+
+          <div id="download-wrap" class="hidden pt-1">
+            <a id="download-btn" href="#" download
+              class="w-full flex items-center justify-center gap-2 bg-good/10 hover:bg-good/20 border border-good/30 transition text-good font-semibold text-sm rounded-lg px-4 py-3">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"/></svg>
+              Download ZIP Package
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="grid grid-cols-3 gap-3">
+        <div class="bg-panel border border-border rounded-xl p-4 text-center">
+          <div id="stat-pages" class="text-2xl font-bold text-white mono">0</div>
+          <div class="text-[11px] text-slate-500 mt-1">Pages Scanned</div>
+        </div>
+        <div class="bg-panel border border-border rounded-xl p-4 text-center">
+          <div id="stat-cars" class="text-2xl font-bold text-white mono">0</div>
+          <div class="text-[11px] text-slate-500 mt-1">Listings Found</div>
+        </div>
+        <div class="bg-panel border border-border rounded-xl p-4 text-center">
+          <div id="stat-images" class="text-2xl font-bold text-white mono">0</div>
+          <div class="text-[11px] text-slate-500 mt-1">Images Saved</div>
+        </div>
+      </div>
+
+      <!-- Console log -->
+      <div class="bg-panel border border-border rounded-2xl overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-panel2/50">
+          <h2 class="text-xs font-semibold text-slate-300 flex items-center gap-2">
+            <span class="flex gap-1.5">
+              <span class="w-2.5 h-2.5 rounded-full bg-bad/60"></span>
+              <span class="w-2.5 h-2.5 rounded-full bg-warn/60"></span>
+              <span class="w-2.5 h-2.5 rounded-full bg-good/60"></span>
+            </span>
+            Activity Console
+          </h2>
+          <button onclick="clearLog()" class="text-[11px] text-slate-500 hover:text-slate-300 transition">clear</button>
+        </div>
+        <div id="log-box" class="h-64 overflow-y-auto p-4 text-xs mono space-y-1.5 bg-bg/60">
+          <div class="log-line text-slate-500">$ awaiting instructions...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Data preview -->
+    <div class="lg:col-span-3">
+      <div class="bg-panel border border-border rounded-2xl overflow-hidden h-full flex flex-col">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-border">
+          <h2 class="text-sm font-semibold text-white flex items-center gap-2">
+            <svg class="w-4 h-4 text-accent2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M3 6h18M3 14h18M3 18h18"/></svg>
+            Data Preview
+          </h2>
+          <span id="preview-count" class="text-[11px] text-slate-500 mono">0 rows</span>
+        </div>
+
+        <div class="overflow-auto flex-1">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-panel2 text-[11px] uppercase tracking-wide text-slate-500 border-b border-border">
+              <tr>
+                <th class="text-left px-5 py-3 font-medium">Car Name</th>
+                <th class="text-left px-5 py-3 font-medium">Price</th>
+                <th class="text-left px-5 py-3 font-medium">Year</th>
+                <th class="text-left px-5 py-3 font-medium">Mileage</th>
+                <th class="text-left px-5 py-3 font-medium">Images</th>
+              </tr>
+            </thead>
+            <tbody id="preview-body" class="divide-y divide-border/60">
+              <tr>
+                <td colspan="5" class="px-5 py-16 text-center text-slate-600">
+                  <div class="flex flex-col items-center gap-2">
+                    <svg class="w-10 h-10 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    <span class="text-xs">No data yet. Start an extraction to see live results.</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <footer class="text-center text-[11px] text-slate-600 mt-8">
+    Universal Car Inventory Scraper &middot; Node.js + Express + Cheerio + ExcelJS + Archiver
+  </footer>
+</div>
+
+<script>
+let isRunning = false;
+
+function log(msg, type = 'info') {
+  const box = document.getElementById('log-box');
+  const colors = { info: 'text-slate-400', ok: 'text-good', warn: 'text-warn', err: 'text-bad', accent: 'text-accent' };
+  const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const line = document.createElement('div');
+  line.className = `log-line ${colors[type] || colors.info}`;
+  line.innerHTML = `<span class="text-slate-600">[${time}]</span> ${escapeHtml(msg)}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-box').innerHTML = '<div class="log-line text-slate-500">$ console cleared</div>';
+}
+
+function escapeHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function setStats({ pages, cars, images }) {
+  if (pages !== undefined) document.getElementById('stat-pages').textContent = pages;
+  if (cars !== undefined) document.getElementById('stat-cars').textContent = cars;
+  if (images !== undefined) document.getElementById('stat-images').textContent = images;
+}
+
+function renderPreview(rows) {
+  const body = document.getElementById('preview-body');
+  document.getElementById('preview-count').textContent = `${rows.length} rows`;
+
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="5" class="px-5 py-16 text-center text-slate-600">No data extracted.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = rows.map(r => `
+    <tr class="hover:bg-panel2/50 transition">
+      <td class="px-5 py-3 text-slate-200 font-medium max-w-xs truncate">${escapeHtml(r.name || '—')}</td>
+      <td class="px-5 py-3 text-accent mono">${escapeHtml(r.price || '—')}</td>
+      <td class="px-5 py-3 text-slate-400 mono">${escapeHtml(r.year || '—')}</td>
+      <td class="px-5 py-3 text-slate-400 mono">${escapeHtml(r.mileage || '—')}</td>
+      <td class="px-5 py-3">
+        <span class="inline-flex items-center gap-1 bg-accent2/10 text-accent2 text-xs font-medium px-2 py-0.5 rounded-full">
+          ${r.imageCount ?? 0} imgs
+        </span>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function setRunning(running) {
+  isRunning = running;
+  const btn = document.getElementById('start-btn');
+  const spinner = document.getElementById('start-btn-spinner');
+  const icon = document.getElementById('start-btn-icon');
+  const text = document.getElementById('start-btn-text');
+
+  btn.disabled = running;
+  spinner.classList.toggle('hidden', !running);
+  icon.classList.toggle('hidden', running);
+  text.textContent = running ? 'Extracting...' : 'Start Extraction';
+  document.getElementById('server-status').textContent = running ? 'scraping...' : 'engine ready';
+}
+
+async function startExtraction() {
+  if (isRunning) return;
+
+  const targetUrl = document.getElementById('target-url').value.trim();
+  const maxPages = parseInt(document.getElementById('max-pages').value, 10) || 1;
+
+  if (!targetUrl) {
+    log('Please provide a target inventory URL.', 'err');
+    return;
+  }
+
+  setRunning(true);
+  document.getElementById('download-wrap').classList.add('hidden');
+  setStats({ pages: 0, cars: 0, images: 0 });
+  renderPreview([]);
+  clearLog();
+  log(`Initializing extraction for ${targetUrl}`, 'accent');
+  log(`Scanning up to ${maxPages} page(s)...`, 'info');
+
+  try {
+    const res = await fetch('/api/scrape', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUrl, maxPages })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || `Request failed with status ${res.status}`);
+    }
+
+    (data.logs || []).forEach(l => log(l.message, l.type || 'info'));
+
+    setStats({
+      pages: data.stats?.pagesScanned ?? 0,
+      cars: data.stats?.carsFound ?? 0,
+      images: data.stats?.imagesDownloaded ?? 0
+    });
+
+    renderPreview(data.cars || []);
+
+    if (data.downloadUrl) {
+      const dl = document.getElementById('download-btn');
+      dl.href = data.downloadUrl;
+      dl.setAttribute('download', data.fileName || 'car-inventory.zip');
+      document.getElementById('download-wrap').classList.remove('hidden');
+      log(`Package ready: ${data.fileName || 'car-inventory.zip'}`, 'ok');
+    }
+
+    log('Extraction complete.', 'ok');
+  } catch (err) {
+    log(`Error: ${err.message}`, 'err');
+  } finally {
+    setRunning(false);
+  }
+}
+</script>
+</body>
+</html>
